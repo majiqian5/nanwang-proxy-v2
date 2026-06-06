@@ -10,35 +10,37 @@ export default async function handler(req, res) {
     res.status(405).json({ error: 'Method Not Allowed' });
     return;
   }
-  // 读取并解析请求体（修复请求体丢失的问题）
+
+  // 正确读取请求体（修复请求体丢失）
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   const body = Buffer.concat(chunks).toString();
-  let parsedBody;
-  try { parsedBody = JSON.parse(body); } catch (e) {
-    res.status(400).json({ error: '无效的 JSON 请求体' });
+  let parsed;
+  try { parsed = JSON.parse(body); } catch {
+    res.status(400).json({ error: '无效 JSON' });
     return;
   }
-  const targetUrl = 'https://95598.csg.cn/ucs/ma/wt/charge/queryChargesWithCode';
+
+  const target = 'https://95598.csg.cn/ucs/ma/wt/charge/queryChargesWithCode';
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 25000);
-    const response = await fetch(targetUrl, {
+    const id = setTimeout(() => controller.abort(), 25000);
+    const resp = await fetch(target, {
       method: 'POST',
       headers: {
         'x-auth-token': req.headers['x-auth-token'] || '',
         'Content-Type': 'application/json',
         'Host': '95598.csg.cn'
       },
-      body: JSON.stringify(parsedBody),
+      body: JSON.stringify(parsed),
       signal: controller.signal
     });
-    clearTimeout(timeout);
-    const data = await response.json();
+    clearTimeout(id);
+    const data = await resp.json();
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.status(response.status).json(data);
-  } catch (error) {
+    res.status(resp.status).json(data);
+  } catch (e) {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.status(502).json({ error: '代理请求失败', detail: error.message });
+    res.status(502).json({ error: '代理请求失败', detail: e.message });
   }
 }
