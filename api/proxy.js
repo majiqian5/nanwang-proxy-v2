@@ -1,5 +1,5 @@
 export default async function handler(req, res) {
-  // 处理预检请求
+  // 预检请求
   if (req.method === 'OPTIONS') {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -13,7 +13,7 @@ export default async function handler(req, res) {
     return;
   }
 
-  // ===== 正确解析请求体 =====
+  // 读取并解析请求体
   const chunks = [];
   for await (const chunk of req) {
     chunks.push(chunk);
@@ -40,7 +40,7 @@ export default async function handler(req, res) {
         'Content-Type': 'application/json',
         'Host': '95598.csg.cn'
       },
-      body: JSON.stringify(parsedBody),  // 使用解析后的对象
+      body: JSON.stringify(parsedBody),   // 关键：使用解析后的对象
       signal: controller.signal
     });
 
@@ -51,9 +51,6 @@ export default async function handler(req, res) {
     res.status(response.status).json(data);
   } catch (error) {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.status(502).json({
-      error: '代理请求失败',
-      detail: error.message
-    });
+    res.status(502).json({ error: '代理请求失败', detail: error.message });
   }
 }
