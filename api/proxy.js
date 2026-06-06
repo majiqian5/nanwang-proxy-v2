@@ -11,7 +11,7 @@ export default async function handler(req, res) {
     return;
   }
 
-  // 直接读取原始请求体文本，不解析也不修改
+  // 读取原始请求体文本（不解析，不修改）
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   const rawBody = Buffer.concat(chunks).toString();
@@ -27,7 +27,7 @@ export default async function handler(req, res) {
         'Content-Type': 'application/json',
         'Host': '95598.csg.cn'
       },
-      body: rawBody,           // 重要：直接使用原始字符串
+      body: rawBody,           // 关键：直接透传原始字符串
       signal: controller.signal
     });
     clearTimeout(id);
