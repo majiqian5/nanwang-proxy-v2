@@ -1,41 +1,58 @@
-export default async function handler(req, res) {
+export const config = { runtime: 'edge' };
+
+export default async function handler(req) {
+  // 处理 CORS 预检请求
   if (req.method === 'OPTIONS') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'x-auth-token, content-type');
-    res.status(200).end();
-    return;
-  }
-  if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Method Not Allowed' });
-    return;
+    return new Response(null, {
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'x-auth-token, content-type',
+      },
+    });
   }
 
-  // 读取原始请求体文本（不解析，不修改）
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  const rawBody = Buffer.concat(chunks).toString();
+  // 只允许 POST 请求
+  if (req.method !== 'POST') {
+    return new Response(JSON.stringify({ error: 'Method Not Allowed' }), {
+      status: 405,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'application/json',
+      },
+    });
+  }
 
   const targetUrl = 'https://95598.csg.cn/ucs/ma/wt/charge/queryChargesWithCode';
+
   try {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 25000);
-    const resp = await fetch(targetUrl, {
+    // 关键：直接透传原始请求体（不解析、不修改）
+    const response = await fetch(targetUrl, {
       method: 'POST',
       headers: {
-        'x-auth-token': req.headers['x-auth-token'] || '',
+        'x-auth-token': req.headers.get('x-auth-token') || '',
         'Content-Type': 'application/json',
-        'Host': '95598.csg.cn'
+        'Host': '95598.csg.cn',
       },
-      body: rawBody,           // 关键：直接透传原始字符串
-      signal: controller.signal
+      body: req.body, // 原始请求体直接转发
     });
-    clearTimeout(id);
-    const data = await resp.json();
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.status(resp.status).json(data);
-  } catch (e) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.status(502).json({ error: '代理请求失败', detail: e.message });
+
+    const data = await response.json();
+
+    return new Response(JSON.stringify(data), {
+      status: response.status,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'application/json',
+      },
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ error: '代理请求失败', detail: error.message }), {
+      status: 502,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'application/json',
+      },
+    });
   }
 }
