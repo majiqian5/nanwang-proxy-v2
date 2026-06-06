@@ -1,7 +1,6 @@
 export const config = { runtime: 'edge' };
 
 export default async function handler(req) {
-  // 处理 CORS 预检请求
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       headers: {
@@ -11,8 +10,6 @@ export default async function handler(req) {
       },
     });
   }
-
-  // 只允许 POST 请求
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method Not Allowed' }), {
       status: 405,
@@ -23,22 +20,17 @@ export default async function handler(req) {
     });
   }
 
-  const targetUrl = 'https://95598.csg.cn/ucs/ma/wt/charge/queryChargesWithCode';
-
   try {
-    // 关键：直接透传原始请求体（不解析、不修改）
-    const response = await fetch(targetUrl, {
+    const response = await fetch('https://95598.csg.cn/ucs/ma/wt/charge/queryChargesWithCode', {
       method: 'POST',
       headers: {
         'x-auth-token': req.headers.get('x-auth-token') || '',
         'Content-Type': 'application/json',
         'Host': '95598.csg.cn',
       },
-      body: req.body, // 原始请求体直接转发
+      body: req.body,
     });
-
     const data = await response.json();
-
     return new Response(JSON.stringify(data), {
       status: response.status,
       headers: {
