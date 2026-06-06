@@ -1,5 +1,5 @@
 export default async function handler(req, res) {
-  // 预检请求
+  // 处理预检请求
   if (req.method === 'OPTIONS') {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -13,7 +13,7 @@ export default async function handler(req, res) {
     return;
   }
 
-  // 读取并解析请求体
+  // 读取完整请求体（关键）
   const chunks = [];
   for await (const chunk of req) {
     chunks.push(chunk);
@@ -40,7 +40,7 @@ export default async function handler(req, res) {
         'Content-Type': 'application/json',
         'Host': '95598.csg.cn'
       },
-      body: JSON.stringify(parsedBody),   // 关键：使用解析后的对象
+      body: JSON.stringify(parsedBody), // 使用解析后的对象
       signal: controller.signal
     });
 
