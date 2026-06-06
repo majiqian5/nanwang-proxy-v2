@@ -1,5 +1,4 @@
 export default async function handler(req, res) {
-  // 处理预检请求
   if (req.method === 'OPTIONS') {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -7,32 +6,23 @@ export default async function handler(req, res) {
     res.status(200).end();
     return;
   }
-
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method Not Allowed' });
     return;
   }
-
-  // 读取完整请求体（关键）
+  // 读取并解析请求体（修复请求体丢失的问题）
   const chunks = [];
-  for await (const chunk of req) {
-    chunks.push(chunk);
-  }
+  for await (const chunk of req) chunks.push(chunk);
   const body = Buffer.concat(chunks).toString();
   let parsedBody;
-  try {
-    parsedBody = JSON.parse(body);
-  } catch (e) {
+  try { parsedBody = JSON.parse(body); } catch (e) {
     res.status(400).json({ error: '无效的 JSON 请求体' });
     return;
   }
-
   const targetUrl = 'https://95598.csg.cn/ucs/ma/wt/charge/queryChargesWithCode';
-
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 25000);
-
     const response = await fetch(targetUrl, {
       method: 'POST',
       headers: {
@@ -40,13 +30,11 @@ export default async function handler(req, res) {
         'Content-Type': 'application/json',
         'Host': '95598.csg.cn'
       },
-      body: JSON.stringify(parsedBody), // 使用解析后的对象
+      body: JSON.stringify(parsedBody),
       signal: controller.signal
     });
-
     clearTimeout(timeout);
     const data = await response.json();
-
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.status(response.status).json(data);
   } catch (error) {
