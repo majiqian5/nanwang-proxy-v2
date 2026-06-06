@@ -16,17 +16,18 @@ export default async function handler(req, res) {
   for await (const chunk of req) chunks.push(chunk);
   const rawBody = Buffer.concat(chunks).toString();
 
+  const targetUrl = 'https://95598.csg.cn/ucs/ma/wt/charge/queryChargesWithCode';
   try {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), 25000);
-    const resp = await fetch('https://95598.csg.cn/ucs/ma/wt/charge/queryChargesWithCode', {
+    const resp = await fetch(targetUrl, {
       method: 'POST',
       headers: {
         'x-auth-token': req.headers['x-auth-token'] || '',
         'Content-Type': 'application/json',
         'Host': '95598.csg.cn'
       },
-      body: rawBody,          // 重要：直接使用原始字符串
+      body: rawBody,           // 重要：直接使用原始字符串
       signal: controller.signal
     });
     clearTimeout(id);
