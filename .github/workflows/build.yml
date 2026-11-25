@@ -1,0 +1,96 @@
+#!/bin/bash
+# build-mac.sh —— 在 macOS runner 上直接用 Apple clang / ld64 编译，产真 arm64e。
+# 不依赖 Theos：只用到 Xcode 自带的 clang、lipo、codesign，加 ldid（有就用）。
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD="$ROOT/build"
+MIN_IOS="15.0"
+SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+ENT="$ROOT/entitlements.plist"
+VER="$(awk '/^Version:/ {print $2}' "$ROOT/control")"
+PKG="$(awk '/^Package:/ {print $2}' "$ROOT/control")"
+
+rm -rf "$BUILD"; mkdir -p "$BUILD"
+
+sign() {
+    local f="$1"
+    if command -v ldid >/dev/null 2>&1; then
+        ldid -S"$ENT" "$f"
+    else
+        codesign --force --sign - --entitlements "$ENT" "$f"
+    fi
+}
+
+build_arch() {
+    local arch="$1"
+    echo ">> [$arch] compile"
+    mkdir -p "$BUILD/obj-$arch"
+    local objs=()
+    for src in "$ROOT"/src/*.m; do
+        local obj="$BUILD/obj-$arch/$(basename "${src%.m}").o"
+        xcrun clang -target "${arch}-apple-ios${MIN_IOS}" -isysroot "$SDK" \
+            -fobjc-arc -fblocks -O2 -Isrc -c "$src" -o "$obj"
+        objs+=("$obj")
+    done
+
+    echo ">> [$arch] link"
+    xcrun clang -target "${arch}-apple-ios${MIN_IOS}" -isysroot "$SDK" \
+        -dynamiclib -undefined dynamic_lookup \
+        -install_name /var/jb/usr/lib/TweakInject/DSH.dylib \
+        -framework Foundation -framework UIKit -framework CoreGraphics \
+        -framework QuartzCore -framework IOKit \
+        -o "$BUILD/DSH-$arch.dylib" "${objs[@]}"
+
+    echo ">> [$arch] sign + check"
+    sign "$BUILD/DSH-$arch.dylib"
+    lipo -info "$BUILD/DSH-$arch.dylib"
+}
+
+build_arch arm64
+build_arch arm64e
+
+echo ">> fat"
+lipo -create "$BUILD/DSH-arm64.dylib" "$BUILD/DSH-arm64e.dylib" -output "$BUILD/DSH.dylib"
+lipo -info "$BUILD/DSH.dylib"
+# fat 合并后按需重签整体（codesign 支持 fat；ldid 不支持）
+if ! command -v ldid >/dev/null 2>&1; then
+    codesign --force --sign - --entitlements "$ENT" "$BUILD/DSH.dylib"
+fi
+
+echo ">> CLI (GOOS=ios, cgo)"
+mkdir -p "$ROOT/layout/usr/bin"
+(
+    cd "$ROOT/tools/dsh-go"
+    GOOS=ios GOARCH=arm64 CGO_ENABLED=1 \
+        CGO_CFLAGS="-isysroot $SDK -miphoneos-version-min=${MIN_IOS} -arch arm64" \
+        CGO_LDFLAGS="-isysroot $SDK -miphoneos-version-min=${MIN_IOS} -arch arm64" \
+        go build -trimpath -ldflags "-s -w" -o "$ROOT/layout/usr/bin/dsh" .
+)
+sign "$ROOT/layout/usr/bin/dsh"
+
+echo ">> staging rootless layout"
+STAGE="$BUILD/root"
+mkdir -p "$STAGE/var/jb/usr/lib/TweakInject" "$STAGE/var/jb/usr/bin"
+cp "$BUILD/DSH.dylib" "$STAGE/var/jb/usr/lib/TweakInject/DSH.dylib"
+cp "$ROOT/DSH.plist" "$STAGE/var/jb/usr/lib/TweakInject/DSH.plist"
+cp "$ROOT"/layout/usr/bin/* "$STAGE/var/jb/usr/bin/"
+chmod 0755 "$STAGE"/var/jb/usr/bin/* 2>/dev/null || true
+mkdir -p "$STAGE/var/jb/Library/DSH" "$STAGE/var/jb/usr/share/doc/com.zaka.dsh"
+cp -R "$ROOT/layout/Library/DSH/." "$STAGE/var/jb/Library/DSH/" 2>/dev/null || true
+cp -R "$ROOT/layout/usr/share/doc/com.zaka.dsh/." "$STAGE/var/jb/usr/share/doc/com.zaka.dsh/" 2>/dev/null || true
+
+mkdir -p "$STAGE/DEBIAN"
+cp "$ROOT/control" "$STAGE/DEBIAN/control"
+cp "$ROOT"/layout/DEBIAN/postinst "$STAGE/DEBIAN/postinst"
+cp "$ROOT"/layout/DEBIAN/prerm "$STAGE/DEBIAN/prerm" 2>/dev/null || true
+chmod 0755 "$STAGE"/DEBIAN/postinst "$STAGE"/DEBIAN/prerm 2>/dev/null || true
+
+echo ">> package"
+mkdir -p "$ROOT/packages"
+DEB="$ROOT/packages/${PKG}_${VER}_iphoneos-arm64.deb"
+rm -f "$DEB"
+dpkg-deb --root-owner-group --build "$STAGE" "$DEB"
+echo "OK -> $DEB"
+
+        
