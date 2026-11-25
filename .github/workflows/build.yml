@@ -1,3 +1,4 @@
+            
 name: build-deb
 
 on:
@@ -12,29 +13,68 @@ jobs:
 
       - name: Show toolchain
         run: |
+          uname -m
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
-      - name: Restore full sources (src + headers + tools + layout + scripts)
+      - name: Restore full sources
         run: |
           set -euo pipefail
-          ls -l dsh-sources.b64
           python3 - <<'PY'
           import base64
           data = open('dsh-sources.b64','rb').read()
           open('/tmp/src.tar.gz','wb').write(base64.b64decode(data))
           PY
           tar xzf /tmp/src.tar.gz -C .
-          echo "== restored tree =="
-          ls -R src | head -30
+          ls src/*.h | head -5
+          ls scripts layout/usr/bin
 
-      - name: Install toolchain extras
+      - name: Install Go (macOS 官方 tarball, 按 CPU 架构选)
+        continue-on-error: true
         run: |
-          brew install dpkg ldid-procursus7 || brew install dpkg || true
+          set -e
+          case "$(uname -m)" in
+            arm64)   G="go1.23.4.darwin-arm64" ;;
+            *)       G="go1.23.4.darwin-amd64" ;;
+          esac
+          curl -fsSL "https://go.dev/dl/${G}.tar.gz" -o /tmp/go.tgz
+          tar xzf /tmp/go.tgz -C /tmp
+          echo "/tmp/go/bin" >> "$GITHUB_PATH"
+          /tmp/go/bin/go version
+
+      - name: Install dpkg
+        run: |
+          brew install dpkg || true
           command -v dpkg-deb
 
       - name: Build + package (Apple clang, real arm64e)
         run: |
+          set -euo pipefail
+          if ! command -v go >/dev/null 2>&1; then
+            echo "!! 没有 go，CLI 降级成 curl 版"
+            python3 - <<'PY'
+          import re
+          p = 'scripts/build-mac.sh'
+          s = open(p).read()
+          start = s.index('echo ">> CLI (GOOS=ios, cgo)"')
+          end = s.index('echo ">> staging rootless layout"')
+          wrapper = '''echo ">> CLI (shell curl 版)"
+          mkdir -p "$ROOT/layout/usr/bin"
+          cat > "$ROOT/layout/usr/bin/dsh" <<'SH'
+          #!/bin/sh
+          B=http://127.0.0.1:21345
+          case "${1:-status}" in
+            status|ping|health|apps|ui|skin|config) curl -s -m 3 "$B/v1/$1"; echo ;;
+            screenshot) curl -s -m 5 "$B/v1/screenshot?path=${2:-/var/mobile/dsh-shot.png}"; echo ;;
+            *) echo "dsh status|apps|ui|skin|config|screenshot [path]"; exit 1 ;;
+          esac
+          SH
+          chmod 0755 "$ROOT/layout/usr/bin/dsh"
+
+          '''
+          open(p,'w').write(s[:start] + wrapper + s[end:])
+          PY
+          fi
           chmod +x scripts/build-mac.sh
           bash scripts/build-mac.sh
 
