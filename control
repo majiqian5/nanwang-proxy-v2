@@ -1,0 +1,12 @@
+Package: com.zaka.dsh
+Name: DSH Engine
+Version: 1.0.6
+Architecture: iphoneos-arm64
+Description: SpringBoard 注入式屏幕自动化引擎：悬浮球/控制面板/桌宠 + HID 触控注入 + 本地控制面（127.0.0.1:21345）。
+ 1.0.3：dylib 改成 arm64+arm64e fat（修复 A12+ 设备 SpringBoard 拒载、装完无任何界面）；dsh CLI 从 macOS 平台改成 iOS 平台并重新签名；dylib 载入时同步写 load.log 便于确认注入。
+ 1.0.2：修掉 5 处崩溃点（层级 10,000,000→2001、不抢 key/main、不原地改 windowScene、无 scene 不建窗、HID 延迟到首次手势）、新增崩溃熔断、装完不 respring、卸载彻底清理。
+Depends: firmware (>= 15.0), ellekit | mobilesubstrate
+Section: Tweaks
+Maintainer: zaka
+Author: zaka
+Tag: purpose::extension, compatible::ios15, compatible::ios16, compatible::ios17
