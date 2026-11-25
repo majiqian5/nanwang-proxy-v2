@@ -1,96 +1,291 @@
-#!/bin/bash
-# build-mac.sh —— 在 macOS runner 上直接用 Apple clang / ld64 编译，产真 arm64e。
-# 不依赖 Theos：只用到 Xcode 自带的 clang、lipo、codesign，加 ldid（有就用）。
-set -euo pipefail
+name: build-deb
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD="$ROOT/build"
-MIN_IOS="15.0"
-SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
-ENT="$ROOT/entitlements.plist"
-VER="$(awk '/^Version:/ {print $2}' "$ROOT/control")"
-PKG="$(awk '/^Package:/ {print $2}' "$ROOT/control")"
+on:
+  push:
+  workflow_dispatch:
 
-rm -rf "$BUILD"; mkdir -p "$BUILD"
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
 
-sign() {
-    local f="$1"
-    if command -v ldid >/dev/null 2>&1; then
-        ldid -S"$ENT" "$f"
-    else
-        codesign --force --sign - --entitlements "$ENT" "$f"
-    fi
-}
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
 
-build_arch() {
-    local arch="$1"
-    echo ">> [$arch] compile"
-    mkdir -p "$BUILD/obj-$arch"
-    local objs=()
-    for src in "$ROOT"/src/*.m; do
-        local obj="$BUILD/obj-$arch/$(basename "${src%.m}").o"
-        xcrun clang -target "${arch}-apple-ios${MIN_IOS}" -isysroot "$SDK" \
-            -fobjc-arc -fblocks -O2 -Isrc -c "$src" -o "$obj"
-        objs+=("$obj")
-    done
+      - name: Install dpkg
+        run: |
+          brew install dpkg || true
+          command -v dpkg-deb
 
-    echo ">> [$arch] link"
-    xcrun clang -target "${arch}-apple-ios${MIN_IOS}" -isysroot "$SDK" \
-        -dynamiclib -undefined dynamic_lookup \
-        -install_name /var/jb/usr/lib/TweakInject/DSH.dylib \
-        -framework Foundation -framework UIKit -framework CoreGraphics \
-        -framework QuartzCore -framework IOKit \
-        -o "$BUILD/DSH-$arch.dylib" "${objs[@]}"
+      - name: Build dylib (arm64 + arm64e, Apple clang)
+        run: |
+          set -euo pipefail
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          MIN="15.0"
+          for ARCH in arm64 arm64e; do
+            echo ">> $ARCH"
+            mkdir -p "build/obj-$ARCH"
+            OBJS=""
+            for src in src/*.m; do
+              obj="build/obj-$ARCH/$(basename "${src%.m}").o"
+              xcrun clang -target "$ARCH-apple-ios$MIN" -isysroot "$SDK" \
+                -fobjc-arc -fblocks -O2 -Isrc -c "$src" -o "$obj"
+              OBJS="$OBJS $obj"
+            done
+            xcrun clang -target "$ARCH-apple-ios$MIN" -isysroot "$SDK" \
+              -dynamiclib -undefined dynamic_lookup \
+              -install_name /var/jb/usr/lib/TweakInject/DSH.dylib \
+              -framework Foundation -framework UIKit -framework CoreGraphics \
+              -framework QuartzCore -framework IOKit \
+              -o "build/DSH-$ARCH.dylib" $OBJS
+            if command -v ldid >/dev/null 2>&1; then
+              ldid -S"$PWD/entitlements.plist" "build/DSH-$ARCH.dylib"
+            else
+              codesign --force --sign - --entitlements entitlements.plist "build/DSH-$ARCH.dylib"
+            fi
+            lipo -info "build/DSH-$ARCH.dylib"
+          done
+          lipo -create build/DSH-arm64.dylib build/DSH-arm64e.dylib -output build/DSH.dylib
+          lipo -info build/DSH.dylib
+          if ! command -v ldid >/dev/null 2>&1; then
+            codesign --force --sign - --entitlements entitlements.plist build/DSH.dylib
+          fi
 
-    echo ">> [$arch] sign + check"
-    sign "$BUILD/DSH-$arch.dylib"
-    lipo -info "$BUILD/DSH-$arch.dylib"
-}
+      - name: Stage layout + package
+        run: |
+          set -euo pipefail
+          VER="$(awk '/^Version:/{print $2}' control)"
+          S="build/root"
+          mkdir -p "$S/var/jb/usr/lib/TweakInject" "$S/var/jb/usr/bin" "$S/DEBIAN" "$S/var/jb/Library/DSH/Skins/aurora" "$S/var/jb/Library/DSH/Skins/sakura" "$S/var/jb/Library/DSH/Skins/midnight"
+          cp build/DSH.dylib "$S/var/jb/usr/lib/TweakInject/DSH.dylib"
+          cp DSH.plist "$S/var/jb/usr/lib/TweakInject/DSH.plist"
 
-build_arch arm64
-build_arch arm64e
+          cat > "$S/var/jb/usr/bin/dsh-check" <<'EOF_DSH'
+          #!/bin/sh
+          P=/var/jb/usr/lib/TweakInject
+          CFG=/var/mobile/Library/Preferences/com.zaka.dsh
 
-echo ">> fat"
-lipo -create "$BUILD/DSH-arm64.dylib" "$BUILD/DSH-arm64e.dylib" -output "$BUILD/DSH.dylib"
-lipo -info "$BUILD/DSH.dylib"
-# fat 合并后按需重签整体（codesign 支持 fat；ldid 不支持）
-if ! command -v ldid >/dev/null 2>&1; then
-    codesign --force --sign - --entitlements "$ENT" "$BUILD/DSH.dylib"
-fi
+          echo "== 版本 =="
+          dpkg -S "$P/DSH.dylib" 2>/dev/null | head -1
+          dpkg -l com.zaka.dsh 2>/dev/null | tail -1
 
-echo ">> CLI (GOOS=ios, cgo)"
-mkdir -p "$ROOT/layout/usr/bin"
-(
-    cd "$ROOT/tools/dsh-go"
-    GOOS=ios GOARCH=arm64 CGO_ENABLED=1 \
-        CGO_CFLAGS="-isysroot $SDK -miphoneos-version-min=${MIN_IOS} -arch arm64" \
-        CGO_LDFLAGS="-isysroot $SDK -miphoneos-version-min=${MIN_IOS} -arch arm64" \
-        go build -trimpath -ldflags "-s -w" -o "$ROOT/layout/usr/bin/dsh" .
-)
-sign "$ROOT/layout/usr/bin/dsh"
+          echo "== 注入信息 =="
+          if [ -f "$P/DSH.plist" ]; then echo "DSH.plist: 已启用"; else echo "DSH.plist: 缺失（被熔断停用或未安装）"; fi
+          ls -la "$P" 2>/dev/null | grep -i dsh || echo "(TweakInject 里没有 DSH 文件)"
 
-echo ">> staging rootless layout"
-STAGE="$BUILD/root"
-mkdir -p "$STAGE/var/jb/usr/lib/TweakInject" "$STAGE/var/jb/usr/bin"
-cp "$BUILD/DSH.dylib" "$STAGE/var/jb/usr/lib/TweakInject/DSH.dylib"
-cp "$ROOT/DSH.plist" "$STAGE/var/jb/usr/lib/TweakInject/DSH.plist"
-cp "$ROOT"/layout/usr/bin/* "$STAGE/var/jb/usr/bin/"
-chmod 0755 "$STAGE"/var/jb/usr/bin/* 2>/dev/null || true
-mkdir -p "$STAGE/var/jb/Library/DSH" "$STAGE/var/jb/usr/share/doc/com.zaka.dsh"
-cp -R "$ROOT/layout/Library/DSH/." "$STAGE/var/jb/Library/DSH/" 2>/dev/null || true
-cp -R "$ROOT/layout/usr/share/doc/com.zaka.dsh/." "$STAGE/var/jb/usr/share/doc/com.zaka.dsh/" 2>/dev/null || true
+          echo "== 注入信标 load.log =="
+          for f in "$CFG/load.log" /var/mobile/Library/DSH/load.log /var/tmp/load.log /tmp/load.log; do
+              if [ -s "$f" ]; then echo "-- $f"; tail -5 "$f"; fi
+          done
+          if [ ! -s "$CFG/load.log" ] && [ ! -s /var/mobile/Library/DSH/load.log ] && \
+             [ ! -s /var/tmp/load.log ] && [ ! -s /tmp/load.log ]; then
+              echo "(四处都没有：dylib 根本没被 ElleKit 载入)"
+          fi
 
-mkdir -p "$STAGE/DEBIAN"
-cp "$ROOT/control" "$STAGE/DEBIAN/control"
-cp "$ROOT"/layout/DEBIAN/postinst "$STAGE/DEBIAN/postinst"
-cp "$ROOT"/layout/DEBIAN/prerm "$STAGE/DEBIAN/prerm" 2>/dev/null || true
-chmod 0755 "$STAGE"/DEBIAN/postinst "$STAGE"/DEBIAN/prerm 2>/dev/null || true
+          echo "== 引擎日志 dsh.log =="
+          if [ -s "$CFG/dsh.log" ]; then echo "-- $CFG/dsh.log"; tail -20 "$CFG/dsh.log"; fi
+          if [ -s /var/mobile/Library/DSH/dsh.log ]; then echo "-- /var/mobile/Library/DSH/dsh.log"; tail -20 /var/mobile/Library/DSH/dsh.log; fi
+          if [ ! -s "$CFG/dsh.log" ] && [ ! -s /var/mobile/Library/DSH/dsh.log ]; then
+              echo "(空：构造函数没跑过)"
+          fi
 
-echo ">> package"
-mkdir -p "$ROOT/packages"
-DEB="$ROOT/packages/${PKG}_${VER}_iphoneos-arm64.deb"
-rm -f "$DEB"
-dpkg-deb --root-owner-group --build "$STAGE" "$DEB"
-echo "OK -> $DEB"
+          echo "== 熔断记录 =="
+          G="$CFG/guard.json"; [ -f "$G" ] || G=/var/mobile/Library/DSH/guard.json
+          if [ -f "$G" ]; then cat "$G"; echo; else echo "(还没有 guard.json)"; fi
+
+          echo "== 配置 =="
+          C="$CFG/config.json"; [ -f "$C" ] || C=/var/mobile/Library/DSH/config.json
+          if [ -f "$C" ]; then cat "$C"; echo; else echo "(还没有 config.json)"; fi
+
+          echo "== 最近 SpringBoard 崩溃涉及的 dylib =="
+          LOG=/var/mobile/Library/Logs/CrashReporter
+          [ -d "$LOG" ] || LOG=/private/var/mobile/Library/Logs/CrashReporter
+          grep -o -i -E "[A-Za-z0-9_.@-]+\.dylib" "$LOG"/SpringBoard*.ips 2>/dev/null | sort | uniq -c | sort -rn | head -10 || echo "(无日志或未崩溃)"
+          exit 0
+          EOF_DSH
+          cat > "$S/var/jb/usr/bin/dsh-on" <<'EOF_DSH'
+          #!/bin/sh
+          # 重新启用注入
+          P=/var/jb/usr/lib/TweakInject
+          [ -f "$P/DSH.plist.disabled" ] && mv -f "$P/DSH.plist.disabled" "$P/DSH.plist" 2>/dev/null
+          echo "DSH 注入已启用。立即加载："
+          echo "  /var/jb/usr/bin/sbreload || killall -9 SpringBoard"
+          exit 0
+          EOF_DSH
+          cat > "$S/var/jb/usr/bin/dsh-off" <<'EOF_DSH'
+          #!/bin/sh
+          # 关闭注入：只保留控制面也不加载 dylib。-ellekit 靠 .plist 过滤器决定注入，改名即可停。
+          P=/var/jb/usr/lib/TweakInject
+          [ -f "$P/DSH.plist" ] && mv -f "$P/DSH.plist" "$P/DSH.plist.disabled" 2>/dev/null
+          killall -9 dsh 2>/dev/null || true
+          echo "DSH 注入已关闭（下次 respring 生效）。立即生效："
+          echo "  /var/jb/usr/bin/sbreload || killall -9 SpringBoard"
+          exit 0
+          EOF_DSH
+          cat > "$S/var/jb/usr/bin/dsh-safe" <<'EOF_DSH'
+          #!/bin/sh
+          P=/var/jb/usr/lib/TweakInject
+          [ -f "$P/DSH.plist" ] && mv -f "$P/DSH.plist" "$P/DSH.plist.disabled" 2>/dev/null
+          killall -9 dsh 2>/dev/null || true
+          if [ -x /var/jb/usr/bin/sbreload ]; then
+              /var/jb/usr/bin/sbreload >/dev/null 2>&1 || killall -9 SpringBoard
+          else
+              killall -9 SpringBoard
+          fi
+          echo "DSH 已停用，桌面已重启。要重新启用：dsh-on"
+          exit 0
+          EOF_DSH
+          cat > "$S/var/jb/Library/DSH/Skins/aurora/manifest.json" <<'EOF_DSH'
+          {
+            "id": "aurora",
+            "name": "极光 Aurora",
+            "version": "1.0.0",
+            "author": "zaka",
+            "theme": {
+              "accent": "#5AC8FA",
+              "accentAlt": "#A87BFF",
+              "background": "#0E1220",
+              "text": "#FFFFFF",
+              "subText": "#8E9AB4",
+              "cornerRadius": 22,
+              "alpha": 0.84,
+              "blur": "dark",
+              "darkContent": true
+            },
+            "pet": {
+              "fps": 8,
+              "size": [120, 120]
+            }
+          }
+          EOF_DSH
+          cat > "$S/var/jb/Library/DSH/Skins/sakura/manifest.json" <<'EOF_DSH'
+          {
+            "id": "sakura",
+            "name": "樱花 Sakura",
+            "version": "1.0.0",
+            "author": "zaka",
+            "theme": {
+              "accent": "#FF7AA2",
+              "accentAlt": "#FFB37A",
+              "background": "#1B1016",
+              "text": "#FFF2F6",
+              "subText": "#C9A7B4",
+              "cornerRadius": 24,
+              "alpha": 0.86,
+              "blur": "dark",
+              "darkContent": true
+            },
+            "pet": {
+              "fps": 10,
+              "size": [124, 124]
+            }
+          }
+          EOF_DSH
+          cat > "$S/var/jb/Library/DSH/Skins/midnight/manifest.json" <<'EOF_DSH'
+          {
+            "id": "midnight",
+            "name": "午夜 Midnight",
+            "version": "1.0.0",
+            "author": "zaka",
+            "theme": {
+              "accent": "#3ED598",
+              "accentAlt": "#37C2E2",
+              "background": "#05080A",
+              "text": "#EAF7F1",
+              "subText": "#7C9A8E",
+              "cornerRadius": 18,
+              "alpha": 0.9,
+              "blur": "ultraThin",
+              "darkContent": true
+            },
+            "pet": {
+              "fps": 8,
+              "size": [116, 116]
+            }
+          }
+          EOF_DSH
+          cat > "$S/var/jb/usr/bin/dsh" <<'EOF_DSH'
+          #!/bin/sh
+          # 轻量 CLI：直接打本地控制面（127.0.0.1:21345），不依赖 Go 二进制
+          B=http://127.0.0.1:21345
+          case "${1:-status}" in
+            status) curl -s -m 3 "$B/v1/status"; echo ;;
+            ping|health) curl -s -m 3 "$B/v1/ping"; echo ;;
+            apps) curl -s -m 3 "$B/v1/apps"; echo ;;
+            ui) curl -s -m 3 "$B/v1/ui"; echo ;;
+            skin) curl -s -m 3 "$B/v1/skin"${2:+?id=$2}; echo ;;
+            config) curl -s -m 3 "$B/v1/config"; echo ;;
+            screenshot) curl -s -m 5 "$B/v1/screenshot?path=${2:-/var/mobile/dsh-shot.png}"; echo ;;
+            *) echo "用法: dsh status|ping|apps|ui|skin [id]|config|screenshot [path]"; exit 1 ;;
+          esac
+          EOF_DSH
+          chmod 0755 "$S/var/jb/usr/bin/"*
+          cat > "$S/DEBIAN/control" <<'EOF_DSH'
+          Package: com.zaka.dsh
+          Name: DSH Engine
+          Version: 1.0.6
+          Architecture: iphoneos-arm64
+          Description: SpringBoard 注入式屏幕自动化引擎：悬浮球/控制面板/桌宠 + HID 触控注入 + 本地控制面（127.0.0.1:21345）。
+           1.0.3：dylib 改成 arm64+arm64e fat（修复 A12+ 设备 SpringBoard 拒载、装完无任何界面）；dsh CLI 从 macOS 平台改成 iOS 平台并重新签名；dylib 载入时同步写 load.log 便于确认注入。
+           1.0.2：修掉 5 处崩溃点（层级 10,000,000→2001、不抢 key/main、不原地改 windowScene、无 scene 不建窗、HID 延迟到首次手势）、新增崩溃熔断、装完不 respring、卸载彻底清理。
+          Depends: firmware (>= 15.0), ellekit | mobilesubstrate
+          Section: Tweaks
+          Maintainer: zaka
+          Author: zaka
+          Tag: purpose::extension, compatible::ios15, compatible::ios16, compatible::ios17
+          EOF_DSH
+          cat > "$S/DEBIAN/postinst" <<'EOF_DSH'
+          #!/bin/sh
+          # 1.0.2：不自动 respring。加载时机交给用户，装完不会再进崩溃循环。
+          set -e
+          JB=/var/jb
+          CFG=/var/mobile/Library/Preferences/com.zaka.dsh
+          mkdir -p "$CFG" 2>/dev/null || true
+          chown mobile:mobile "$CFG" 2>/dev/null || true
+
+          if [ ! -f "$CFG/config.json" ]; then
+              cat > "$CFG/config.json" <<'JSON'
+          {"serverEnabled":true,"port":21345,"skinIdentifier":"aurora","bubbleEnabled":true,"petEnabled":false,"petPassthrough":true,"accessibilityFallback":true,"hapticsEnabled":true,"hidScaleToPixels":false}
+          JSON
+              chown mobile:mobile "$CFG/config.json" 2>/dev/null || true
+              chmod 644 "$CFG/config.json" 2>/dev/null || true
+          fi
+
+          # 熔断基准时间：只统计"装完之后"新增的 SpringBoard 崩溃日志，避免旧日志误伤。
+          TS=$(date +%s)
+          cat > "$CFG/guard.json" <<JSON
+          {"installTs":$TS,"crashes":0,"seen":[]}
+          JSON
+          chown mobile:mobile "$CFG/guard.json" 2>/dev/null || true
+          chmod 644 "$CFG/guard.json" 2>/dev/null || true
+
+
+          # 注入文件权限/属主按 ElleKit 要求规范（root:wheel）
+          INJ="$JB/usr/lib/TweakInject"
+          if [ -f "$INJ/DSH.plist.disabled" ]; then
+              mv -f "$INJ/DSH.plist.disabled" "$INJ/DSH.plist" 2>/dev/null || true
+              echo "[DSH] 恢复此前被熔断停用的注入（重新启用）"
+          fi
+          chown root:wheel "$INJ/DSH.dylib" "$INJ/DSH.plist" 2>/dev/null || true
+          chmod 0755 "$INJ/DSH.dylib" 2>/dev/null || true
+          chmod 0644 "$INJ/DSH.plist" 2>/dev/null || true
+          chmod 755 "$JB/usr/bin/dsh" "$JB/usr/bin/dsh-on" "$JB/usr/bin/dsh-off" "$JB/usr/bin/dsh-safe" "$JB/usr/bin/dsh-check" 2>/dev/null || true
+
+          echo "[DSH] 已安装（1.0.4），未自动 respring。加载：ldrestart 或 sbreload"
+          echo "[DSH] 关注入：dsh-off    紧急：dsh-safe    诊断：dsh-check"
+          exit 0
+          EOF_DSH
+          printf '#!/bin/sh\nexit 0\n' > "$S/DEBIAN/prerm"
+          chmod 0755 "$S/DEBIAN/postinst" "$S/DEBIAN/prerm"
+          mkdir -p packages
+          dpkg-deb --root-owner-group --build "$S" "packages/com.zaka.dsh_${VER}_iphoneos-arm64.deb"
+          ls -lh packages/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-deb
+          path: packages/*.deb
 
         
